@@ -46,3 +46,32 @@ pub fn write_image(pdf: &mut Pdf, alloc: &mut impl FnMut() -> Ref, img: &Image) 
     }
     id
 }
+
+/// A bitmap as `CPDF_Image::SetImage` writes it: 8-bit RGB and, for a BGRA one, an 8-bit gray soft
+/// mask from the alpha channel, both deflated.
+pub fn write_bitmap(pdf: &mut Pdf, alloc: &mut impl FnMut() -> Ref, b: &super::Bitmap) -> Ref {
+    use pdf_writer::Filter;
+    let deflate = |d: &[u8]| miniz_oxide::deflate::compress_to_vec_zlib(d, 6);
+    let id = alloc();
+    let mask = b.alpha.then(|| {
+        let mid = alloc();
+        let alpha: Vec<u8> = b.px.iter().map(|p| p[3]).collect();
+        let data = deflate(&alpha);
+        let mut x = pdf.image_xobject(mid, &data);
+        x.filter(Filter::FlateDecode);
+        x.width(b.w as i32).height(b.h as i32);
+        x.color_space_name(Name(b"DeviceGray"))
+            .bits_per_component(8);
+        mid
+    });
+    let rgb: Vec<u8> = b.px.iter().flat_map(|p| [p[0], p[1], p[2]]).collect();
+    let data = deflate(&rgb);
+    let mut x = pdf.image_xobject(id, &data);
+    x.filter(Filter::FlateDecode);
+    x.width(b.w as i32).height(b.h as i32);
+    x.color_space_name(Name(b"DeviceRGB")).bits_per_component(8);
+    if let Some(m) = mask {
+        x.s_mask(m);
+    }
+    id
+}

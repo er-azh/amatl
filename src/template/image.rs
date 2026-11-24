@@ -16,13 +16,23 @@ pub enum Mask {
     Stencil(Vec<u8>),
 }
 
-impl Image {
-    /// Decode a PNG as Qt does (8 bits a channel) and encode it for the PDF.
-    pub fn from_png(data: &[u8]) -> Option<Image> {
+/// A PNG decoded as Qt does (8 bits a channel): size, resolution in dpi and straight RGBA pixels.
+pub(crate) struct Png {
+    pub w: usize,
+    pub h: usize,
+    pub dpi: (u16, u16),
+    pub px: Vec<[u8; 4]>,
+    /// Truecolor without transparency, which Qt loads as `QImage::Format_RGB32`.
+    pub rgb32: bool,
+}
+
+impl Png {
+    pub fn decode(data: &[u8]) -> Option<Png> {
         let mut dec = png::Decoder::new(std::io::Cursor::new(data));
         dec.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
         let mut r = dec.read_info().ok()?;
-        // QImage's resolution: the pHYs chunk if in meters, else 96 dpi; the JPEG gets it in dpi.
+        let rgb32 = r.info().color_type == png::ColorType::Rgb && r.info().trns.is_none();
+        // QImage's resolution: the pHYs chunk if in meters, else 96 dpi.
         let dpi = match r.info().pixel_dims {
             Some(png::PixelDimensions {
                 xppu,
@@ -38,19 +48,32 @@ impl Image {
         let f = r.next_frame(&mut buf).ok()?;
         let (w, h) = (f.width as usize, f.height as usize);
         let n = f.color_type.samples();
-        let px = |i: usize| -> [u8; 4] {
-            let p = &buf[i * n..i * n + n];
-            match n {
+        let px = buf[..w * h * n]
+            .chunks_exact(n)
+            .map(|p| match n {
                 1 => [p[0], p[0], p[0], 255],
                 2 => [p[0], p[0], p[0], p[1]],
                 3 => [p[0], p[1], p[2], 255],
                 _ => [p[0], p[1], p[2], p[3]],
-            }
-        };
+            })
+            .collect();
+        Some(Png {
+            w,
+            h,
+            dpi,
+            px,
+            rgb32,
+        })
+    }
+}
+
+impl Image {
+    /// Decode a PNG as Qt does and encode it for the PDF (the JPEG gets the PNG's dpi).
+    pub fn from_png(data: &[u8]) -> Option<Image> {
+        let Png { w, h, dpi, px, .. } = Png::decode(data)?;
         let mut rgb = Vec::with_capacity(w * h * 3);
         let mut alpha = Vec::with_capacity(w * h);
-        for i in 0..w * h {
-            let p = px(i);
+        for p in px {
             rgb.extend_from_slice(&p[..3]);
             alpha.push(p[3]);
         }

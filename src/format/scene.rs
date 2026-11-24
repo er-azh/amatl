@@ -252,12 +252,49 @@ pub struct GlyphRange {
     pub extra: Vec<u8>,
 }
 
+/// One vertex of an image item's mesh: scene position and texture coordinates (0..1 across the
+/// image, v down).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Vertex {
+    pub x: f32,
+    pub y: f32,
+    pub u: f32,
+    pub v: f32,
+}
+
+/// An image placed in the scene (`SceneImageItem`, made by the capture tool): a triangle mesh
+/// textured with a PNG from the scene's image table.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImageItem {
+    /// Key of the image in [`Scene::images`].
+    pub image: Lww<ImageKey>,
+    pub id2: Option<CrdtId>,
+    pub vertices: Vec<Vertex>,
+    /// Triangles, three vertex indices each.
+    pub indices: Vec<u32>,
+    pub id5: Option<CrdtId>,
+    pub extra: Vec<u8>,
+}
+
+/// Key of an image in the scene's image table: 16 bytes.
+pub type ImageKey = [u8; 16];
+
+/// An entry of the scene's image table (`SceneImagesTable`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImageRef {
+    /// The PNG's file name, in the page's directory of the document (`<doc>/<page>/<file>`).
+    pub file: Lww<String>,
+    /// Field 2, a byte (0 in the samples).
+    pub flag: Option<Lww<u8>>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ItemValue {
     /// Reference to a child group node.
     Group(CrdtId),
     Line(Line),
     Glyph(GlyphRange),
+    Image(ImageItem),
     /// Item kind this reader does not decode yet: (kind byte, raw value).
     Unknown(u8, Vec<u8>),
 }
@@ -420,6 +457,8 @@ pub struct Scene {
     /// Items of each group node, keyed by parent id, in file order.
     pub items: HashMap<CrdtId, Vec<Item<ItemValue>>>,
     pub text: Option<RootText>,
+    /// The image table: the PNGs image items refer to.
+    pub images: HashMap<ImageKey, ImageRef>,
     pub warnings: Vec<String>,
 }
 

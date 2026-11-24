@@ -5,6 +5,7 @@ mod builtin;
 mod image;
 pub mod json;
 
+pub(crate) use image::Png;
 pub use image::{Image, Mask};
 
 /// A pen as Qt's PDF engine writes it.

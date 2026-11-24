@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 mod page;
 
-pub use page::{Size, draw, page};
+pub use page::{Images, Size, draw, no_images, page};
 
 use crate::format::Scene;
 use crate::render::Paper;
@@ -73,7 +73,9 @@ pub fn rmdoc(
             out.push(
                 match p.redir.and_then(|r| src.page_size(r).map(|s| (r, s))) {
                     Some((r, size)) => {
-                        let (pg, content) = draw(sc, "", paper, Size::Fixed(size), assets, warn);
+                        let images = |f: &str| doc.image(&p.id, f).map(<[u8]>::to_vec);
+                        let (pg, content) =
+                            draw(sc, "", paper, Size::Fixed(size), &images, assets, warn);
                         crate::pdf::overlay::Out::Overlay {
                             index: r,
                             page: pg,
@@ -84,11 +86,13 @@ pub fn rmdoc(
                         if let Some(r) = p.redir {
                             warn(format!("PDF has no page {r}; exported as a note page"));
                         }
+                        let images = |f: &str| doc.image(&p.id, f).map(<[u8]>::to_vec);
                         crate::pdf::overlay::Out::Note(page(
                             sc,
                             &p.template,
                             orientation,
                             paper,
+                            &images,
                             assets,
                             warn,
                         ))
@@ -101,11 +105,13 @@ pub fn rmdoc(
     let mut out = Vec::new();
     for (p, sc) in refs.iter().zip(&scenes) {
         let paper = Paper::of(sc).unwrap_or(paper);
+        let images = |f: &str| doc.image(&p.id, f).map(<[u8]>::to_vec);
         out.push(page(
             sc,
             &p.template,
             orientation,
             paper,
+            &images,
             assets,
             &mut |w| warn(format!("page {}: {w}", p.id)),
         ));

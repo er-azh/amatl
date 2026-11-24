@@ -2,6 +2,8 @@
 //! way xochitl's PDF exporter does.
 //! `-t` sets the template (the `.content` page entry's name, e.g. "P Hexagon small") of the
 //! pages after it; `-L` / `-P` make the following pages landscape / portrait (page size from each page's paper).
+//! A page's images (captures) are read from the directory named after it, as in a document
+//! (`PAGE/NAME` next to `PAGE.rm`).
 #[path = "shared/assets.rs"]
 mod assets;
 
@@ -34,11 +36,14 @@ fn main() {
         }
         let sc =
             Scene::parse(&std::fs::read(&src).unwrap()).unwrap_or_else(|e| panic!("{src}: {e}"));
+        let dir = std::path::PathBuf::from(src.strip_suffix(".rm").unwrap_or(&src));
+        let images = |f: &str| std::fs::read(dir.join(f)).ok();
         pages.push(page(
             &sc,
             &template,
             orientation,
             Paper::of(&sc).unwrap_or(Paper::RM2),
+            &images,
             &mut assets,
             &mut |w| eprintln!("{src}: warning: {w}"),
         ));

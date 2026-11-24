@@ -34,6 +34,20 @@ pub fn premultiply(c: u32) -> u32 {
         | ((a * (c & 0xff)) / 0xff)
 }
 
+/// `t / 255`, rounded to nearest.
+#[inline]
+pub fn div255(t: u32) -> u32 {
+    (t + 127) / 255
+}
+
+/// Rounds to nearest, unlike `premultiply`, which truncates as the stroke colors need.
+#[inline]
+pub fn premultiply_round(c: u32) -> u32 {
+    let a = c >> 24;
+    let ch = |s: u32| div255(((c >> s) & 0xff) * a) << s;
+    (a << 24) | ch(16) | ch(8) | ch(0)
+}
+
 #[inline]
 pub fn unpremultiply(c: u32) -> [f32; 3] {
     let a = c >> 24;

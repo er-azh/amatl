@@ -7,16 +7,22 @@ mod color;
 mod geom;
 mod paper;
 mod pencil;
+pub(crate) mod qpaint;
 pub(crate) mod raster;
 mod shader;
 mod solid;
 mod stroker;
 
 pub(crate) use color::{premultiply, unpremultiply};
-pub use geom::{Offsets, anchor_offsets, content_rect};
+pub(crate) use geom::image_transform;
+pub use geom::{ImageAt, Offsets, anchor_offsets, content_rect, images};
 pub use paper::{DPI, Paper};
+pub(crate) use qpaint::Affine;
 
-use crate::format::{ItemValue, Line, Node, Rect, Scene, Tool};
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use crate::format::{ImageItem, ImageKey, ItemValue, Line, Node, Rect, Scene, Tool};
 use geom::offset;
 
 /// Premultiplied ARGB32 image; 0 is transparent.
@@ -155,12 +161,34 @@ pub struct Renderer {
     pub offsets: Offsets,
     /// Leave out the shading tools (highlighters and the shading marker): the exporter's class pass.
     pub(crate) no_shading: bool,
+    /// Which items to draw (the exporter's raster passes).
+    pub(crate) pass: Pass,
+    /// The images of image items by key, drawn in [`Pass::All`].
+    pub(crate) images: HashMap<ImageKey, Arc<Texture>>,
     /// Offset of the group being drawn.
     origin: (f32, f32),
     /// Set by [`Renderer::align_to`]: the exporter's raster, drawn in 1024-pixel tiles.
     raster: Option<Raster>,
     /// Raster position of the tile being drawn.
     tile: (i32, i32),
+}
+
+/// The items a raster pass of the exporter draws (`PageVectorizer`'s item sets).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Pass {
+    /// Every line, and image items: everything but text (passes 3 and 4).
+    All,
+    /// Lines the exporter traces, not the ones it passes through as strokes (pass 1).
+    Traced,
+    /// Only the lines it passes through as strokes (pass 2).
+    Direct,
+}
+
+/// An image as Qt holds an ARGB32 one: straight alpha, `0xAARRGGBB`, row by row.
+pub(crate) struct Texture {
+    pub w: u32,
+    pub h: u32,
+    pub px: Vec<u32>,
 }
 
 #[derive(Clone, Copy)]
@@ -182,6 +210,8 @@ impl Renderer {
             warnings: Vec::new(),
             direct: None,
             no_shading: false,
+            pass: Pass::All,
+            images: HashMap::new(),
             offsets: Offsets::new(),
             origin: (0.0, 0.0),
             raster: None,
@@ -193,6 +223,12 @@ impl Renderer {
         if let Some(d) = self.direct.as_mut().filter(|_| line.tool.is_direct()) {
             d.push((line.clone(), self.origin));
             return;
+        }
+        match self.pass {
+            Pass::All => {}
+            Pass::Traced if line.tool.is_direct() => return,
+            Pass::Direct if !line.tool.is_direct() => return,
+            _ => {}
         }
         let Some(ras) = self.raster else {
             return self.draw_tool(line);
@@ -294,10 +330,83 @@ impl Renderer {
                     }
                 }
                 Some(ItemValue::Line(l)) => self.draw_line(l),
+                Some(ItemValue::Image(i)) => self.draw_image(i),
                 _ => {}
             }
         }
         self.origin = saved;
+    }
+
+    /// An image item as the scene paints it (`QPainter::drawImage` under the item's transform and
+    /// its group's offset), in each tile of the exporter's raster.
+    fn draw_image(&mut self, item: &ImageItem) {
+        if self.pass != Pass::All {
+            return;
+        }
+        let Some(tex) = self.images.get(&item.image.value).cloned() else {
+            return;
+        };
+        let Some(t) = image_transform(item) else {
+            return;
+        };
+        let texture = qpaint::Texture {
+            w: tex.w as i32,
+            h: tex.h as i32,
+            px: &tex.px,
+        };
+        let s = self.scale as f64;
+        let g = Affine::translation(self.origin.0 as f64, self.origin.1 as f64);
+        let mut ok = true;
+        match self.raster {
+            None => {
+                let p = Affine {
+                    m11: s,
+                    m22: s,
+                    dx: self.dx,
+                    dy: self.dy,
+                    ..Affine::IDENTITY
+                };
+                let m = t.then(&g.then(&p));
+                let device = self.canvas.w.max(self.canvas.h) as i32;
+                ok = qpaint::draw_image(&mut self.canvas, &m, &texture, device);
+            }
+            Some(ras) => {
+                let (w, h) = (self.canvas.w as i32, self.canvas.h as i32);
+                let mut ty = 0;
+                while ty < ras.size.1 && ok {
+                    let mut tx = 0;
+                    while tx < ras.size.0 && ok {
+                        self.canvas.view = View {
+                            off: (ras.origin.0 + tx, ras.origin.1 + ty),
+                            clip: (
+                                0,
+                                0,
+                                (ras.size.0 - tx).min(1024),
+                                (ras.size.1 - ty).min(1024),
+                            ),
+                        };
+                        // The tile's painter: fromTranslate(64 - tile) * scale * translate(-corner).
+                        let mut p = Affine::translation((64 - tx) as f64, (64 - ty) as f64);
+                        p.scale(s, s);
+                        p.translate(-ras.corner.0, -ras.corner.1);
+                        let m = t.then(&g.then(&p));
+                        ok = qpaint::draw_image(&mut self.canvas, &m, &texture, 1024);
+                        tx += 1024;
+                    }
+                    ty += 1024;
+                }
+                self.canvas.view = View {
+                    off: (0, 0),
+                    clip: (0, 0, w, h),
+                };
+            }
+        }
+        if !ok {
+            let w = "rotated image left out of the traced raster (not reproduced)".to_string();
+            if !self.warnings.contains(&w) {
+                self.warnings.push(w);
+            }
+        }
     }
 
     /// Shift geometry the way the PDF exporter does. It rasterizes with the content rect's corner

@@ -1,12 +1,26 @@
 //! One page through the pipeline: lay out text, rasterize and trace the strokes, and collect
 //! everything a PDF page draws.
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use super::Assets;
-use crate::format::{ItemValue, Line, Rect, RootText, Scene, Tool};
-use crate::pdf::{Highlight, Rule, Stroke, TextLine};
-use crate::render::{DPI, Paper, Renderer, anchor_offsets, content_rect};
+use crate::format::{ImageKey, ItemValue, Line, Rect, RootText, Scene, Tool};
+use crate::pdf::{Bitmap, Highlight, Picture, Rule, Stroke, TextLine};
+use crate::render::{
+    Affine, DPI, Offsets, Paper, Pass, Renderer, Texture, anchor_offsets, content_rect,
+};
 use crate::rmdoc::Orientation;
 use crate::text::{Fonts, Layout, layout, to_px};
 use crate::trace::{P, Pt};
+
+/// The files of a page's image items (captures) by name, as listed in the scene's image table:
+/// in a document they are `<doc>/<page>/<name>`.
+pub type Images<'a> = &'a dyn Fn(&str) -> Option<Vec<u8>>;
+
+/// No image files: image items are left out with a warning.
+pub fn no_images(_: &str) -> Option<Vec<u8>> {
+    None
+}
 
 /// One page of `paper` as xochitl's PDF exporter draws it.
 pub fn page(
@@ -14,6 +28,7 @@ pub fn page(
     template: &str,
     orientation: Orientation,
     paper: Paper,
+    images: Images,
     assets: &mut Assets,
     warn: &mut dyn FnMut(String),
 ) -> crate::pdf::Page {
@@ -22,6 +37,7 @@ pub fn page(
         template,
         paper,
         Size::Grow(paper.page(orientation)),
+        images,
         assets,
         warn,
     )
@@ -44,6 +60,7 @@ pub fn draw(
     template: &str,
     paper: Paper,
     size: Size,
+    images: Images,
     assets: &mut Assets,
     warn: &mut dyn FnMut(String),
 ) -> (crate::pdf::Page, Option<Rect>) {
@@ -71,29 +88,65 @@ pub fn draw(
         }
         None => (0, 0, page.0, page.1),
     };
+    let bitmaps = decode_images(sc, images, warn);
+    let textures: HashMap<ImageKey, Arc<Texture>> = bitmaps
+        .iter()
+        .map(|(k, b)| {
+            let px =
+                b.px.iter()
+                    .map(|p| u32::from_be_bytes([p[3], p[0], p[1], p[2]]));
+            let t = Texture {
+                w: b.w,
+                h: b.h,
+                px: px.collect(),
+            };
+            (*k, Arc::new(t))
+        })
+        .collect();
     let renderer = || {
         let mut r = Renderer::new((base.2 - base.0) as u32, (base.3 - base.1) as u32);
         r.center = (pw as i32 / 2 - base.0, -base.1);
-        r.direct = Some(Vec::new());
         r.offsets = offsets.clone();
         r
     };
+    // Pass 1: the traced lines; the others are collected as strokes.
     let mut r = renderer();
+    r.direct = Some(Vec::new());
+    r.pass = Pass::Traced;
     let mut groups = Vec::new();
     if let Some(rect) = content {
         r.align_to(rect);
         r.draw_scene(sc);
-        let class = has_shading(sc).then(|| {
+        // The other passes draw what they hold, pass-through lines rasterized too.
+        let pass = |pass: Pass, no_shading: bool| {
             let mut p = renderer();
-            p.no_shading = true;
+            p.pass = pass;
+            p.no_shading = no_shading;
+            p.images = textures.clone();
             p.align_to(rect);
             p.draw_scene(sc);
-            p.canvas
-                .px
+            p.canvas.px
+        };
+        // The exporter's combine (per pixel of pass 1, `traced`): where the traced lines are
+        // covered by something else (pass 3: everything), the region takes that color, unless
+        // it is only pass-through lines (pass 2).
+        let mut traced = std::mem::take(&mut r.canvas.px);
+        if !textures.is_empty() || has_direct(sc) {
+            let (all, direct) = (pass(Pass::All, false), pass(Pass::Direct, false));
+            for ((t, &a), &d) in traced.iter_mut().zip(&all).zip(&direct) {
+                if *t != 0 && *t != a {
+                    *t = if a == d { 0 } else { a };
+                }
+            }
+        }
+        // Pass 4: everything but the shading tools; its empty pixels are labeler class 1.
+        let class = has_shading(sc).then(|| {
+            pass(Pass::All, true)
                 .iter()
                 .map(|&c| (c == 0) as u8)
                 .collect::<Vec<_>>()
         });
+        r.canvas.px = traced;
         groups = crate::trace::vectorize(
             &r.canvas.px,
             class.as_deref(),
@@ -153,6 +206,7 @@ pub fn draw(
         warn(format!("template {template:?} not found or not supported"));
     }
     let highlights = highlights(pw, sc);
+    let pictures = pictures(pw, sc, &offsets, &bitmaps, warn);
     (
         crate::pdf::Page {
             w: pw,
@@ -163,6 +217,7 @@ pub fn draw(
             shapes,
             highlights,
             strokes,
+            pictures,
             groups,
         },
         content,
@@ -188,6 +243,68 @@ fn highlights(pw: u32, sc: &Scene) -> Vec<Highlight> {
             _ => None,
         })
         .collect()
+}
+
+/// The PNGs of the scene's image table, decoded (straight RGBA), by image key.
+fn decode_images(
+    sc: &Scene,
+    images: Images,
+    warn: &mut dyn FnMut(String),
+) -> HashMap<ImageKey, Arc<Bitmap>> {
+    let mut out = HashMap::new();
+    let mut keys: Vec<_> = crate::render::images(sc, &Offsets::new())
+        .into_iter()
+        .map(|(i, _, _)| i.image.value)
+        .collect();
+    keys.sort_unstable();
+    keys.dedup();
+    for key in keys {
+        let Some(file) = sc.images.get(&key).map(|r| r.file.value.as_str()) else {
+            warn("image item without an image table entry; left out".into());
+            continue;
+        };
+        let Some(data) = images(file) else {
+            warn(format!("image {file} not found; left out"));
+            continue;
+        };
+        let Some(png) = crate::template::Png::decode(&data) else {
+            warn(format!("image {file} is not a PNG; left out"));
+            continue;
+        };
+        let b = Bitmap {
+            w: png.w as u32,
+            h: png.h as u32,
+            px: png.px,
+            alpha: !png.rgb32,
+        };
+        out.insert(key, Arc::new(b));
+    }
+    out
+}
+
+/// The image items as image objects.
+fn pictures(
+    pw: u32,
+    sc: &Scene,
+    offsets: &Offsets,
+    bitmaps: &HashMap<ImageKey, Arc<Bitmap>>,
+    warn: &mut dyn FnMut(String),
+) -> Vec<Picture> {
+    let mut out = Vec::new();
+    for (item, o, before) in crate::render::images(sc, offsets) {
+        let Some(bitmap) = bitmaps.get(&item.image.value).cloned() else {
+            continue;
+        };
+        let Some(t) = crate::render::image_transform(item) else {
+            warn("image item whose mesh is not a textured rectangle; left out".into());
+            continue;
+        };
+        // The item's transform, then its group's offset (page center included).
+        let g = Affine::translation(pw as f64 / 2.0 + o.0 as f64, o.1 as f64);
+        let m = t.then(&g);
+        out.push(Picture { bitmap, m, before });
+    }
+    out
 }
 
 /// Pass-through stroke for a direct line (`PageVectorizer::rasterVectorize`): raw points,
@@ -256,6 +373,14 @@ fn text_lines(
     lines
 }
 
+/// Whether a line is passed through as a stroke (and so drawn in the exporter's passes 2-4).
+fn has_direct(sc: &Scene) -> bool {
+    sc.items
+        .values()
+        .flatten()
+        .any(|it| matches!(&it.value, Some(ItemValue::Line(l)) if l.tool.is_direct()))
+}
+
 /// Whether a rasterized line uses a shading tool (the shader; highlighters are direct).
 fn has_shading(sc: &Scene) -> bool {
     sc.items
@@ -289,5 +414,67 @@ fn page_size(
         (w, bottom + MARGIN)
     } else {
         (w, h)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::format::{CrdtId, ImageItem, Lww, Vertex};
+    use crate::render::image_transform;
+
+    fn item(vertices: Vec<Vertex>, indices: Vec<u32>) -> ImageItem {
+        ImageItem {
+            image: Lww {
+                timestamp: CrdtId(0, 0),
+                value: [0; 16],
+            },
+            id2: None,
+            vertices,
+            indices,
+            id5: None,
+            extra: vec![],
+        }
+    }
+
+    fn v(x: f32, y: f32, u: f32, v: f32) -> Vertex {
+        Vertex { x, y, u, v }
+    }
+
+    #[test]
+    fn transform_of_a_rotated_capture() {
+        let it = item(
+            vec![
+                v(293.48477, 374.17453, 0.0, 0.0),
+                v(134.37666, 787.0931, 1.0, 0.0),
+                v(-38.151978, 720.61334, 1.0, 1.0),
+                v(120.95615, 307.69482, 0.0, 1.0),
+            ],
+            vec![0, 1, 2, 2, 3, 0],
+        );
+        let t = image_transform(&it).unwrap();
+        assert_eq!(t.m11, (134.37666f32 - 293.48477f32) as f64);
+        assert_eq!(t.m22, (720.61334f32 - 787.0931f32) as f64);
+        assert_eq!(t.dx, ((293.48477f32 + -38.151978f32) * 0.5) as f64);
+        // (-0.5, -0.5) is the corner textured (0, 0).
+        let (x, y) = t.map(-0.5, -0.5);
+        assert!((x - 293.48477).abs() < 1e-3 && (y - 374.17453).abs() < 1e-3);
+    }
+
+    #[test]
+    fn transform_needs_a_rectangle() {
+        let corners = |p11: Vertex| {
+            vec![
+                v(0.0, 0.0, 0.0, 0.0),
+                v(10.0, 0.0, 1.0, 0.0),
+                p11,
+                v(0.0, 5.0, 0.0, 1.0),
+            ]
+        };
+        let ok = item(corners(v(10.0, 5.0, 1.0, 1.0)), vec![0, 1, 2, 2, 3, 0]);
+        assert!(image_transform(&ok).is_some());
+        let skewed = item(corners(v(12.0, 7.0, 1.0, 1.0)), vec![0, 1, 2, 2, 3, 0]);
+        assert!(image_transform(&skewed).is_none());
+        let not_split = item(corners(v(10.0, 5.0, 1.0, 1.0)), vec![0, 1, 2, 0, 1, 3]);
+        assert!(image_transform(&not_split).is_none());
     }
 }

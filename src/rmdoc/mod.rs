@@ -18,8 +18,8 @@ pub enum Error {
     PageId,
 }
 
-/// A document's files, as unpacked from its zip: `{id}.content`, `{id}.pagedata`, `{id}.pdf`
-/// and the pages' `{id}/{page}.rm`.
+/// A document's files, as unpacked from its zip: `{id}.content`, `{id}.pagedata`, `{id}.pdf`,
+/// the pages' `{id}/{page}.rm` and their images' `{id}/{page}/{name}`.
 pub struct Archive {
     id: String,
     files: Vec<(String, Vec<u8>)>,
@@ -67,6 +67,11 @@ impl Archive {
     /// A page's `.rm` file.
     pub fn page(&self, page: &str) -> Option<&[u8]> {
         self.file(&format!("{}/{page}.rm", self.id))
+    }
+
+    /// A file of a page's image item (a capture), named in the page's image table.
+    pub fn image(&self, page: &str, name: &str) -> Option<&[u8]> {
+        self.file(&format!("{}/{page}/{name}", self.id))
     }
 
     /// The PDF a PDF or EPUB backed document annotates.

@@ -34,6 +34,7 @@ You can then pass them to the binaries via env vars (`RM_FONTS` and `RM_TEMPLATE
 ## Features and limitations
 - All tools and text types as of `3.29.0.153` are tested and fully supported.
 - All built-in and custom templates are supported, but SVG backgrounds in templates are not; the PNG fallback is used instead.
+- Captures (images placed with the Capture tool, `3.29.2`) are exported as image objects, as the tablet does, and drawn into the traced raster. Rotated captures are placed in the PDF but not yet drawn into the raster; a warning is printed for them.
 - Annotated (mixed) documents and EPUBs are fully supported, but note that rendering EPUBs requires an existing PDF render, which xochitl automatically generates when you open an EPUB.
 - Rasterization is also supported. See [rmrender](src/bin/rmrender.rs).
 - Scene format V5 and older are not tested or supported; only V6 is.
@@ -78,7 +79,9 @@ use amatl::rmdoc::Orientation;
 let mut assets = Assets::default();
 let scene = Scene::parse(&std::fs::read("page.rm")?)?;
 let paper = Paper::of(&scene).unwrap_or(Paper::RM2);
-let pg = page(&scene, "P Lines small", Orientation::Portrait, paper, &mut assets, &mut |w| eprintln!("{w}"));
+// the page's captured images, `<page>/<name>` in the document; `&no_images` without any
+let images = |name: &str| std::fs::read(std::path::Path::new("page").join(name)).ok();
+let pg = page(&scene, "P Lines small", Orientation::Portrait, paper, &images, &mut assets, &mut |w| eprintln!("{w}"));
 std::fs::write("page.pdf", amatl::pdf::write(&[pg]))?;
 ```
 The template name and orientation can be found in the document's `.content` file.

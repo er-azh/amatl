@@ -56,9 +56,27 @@ fn print_node(sc: &Scene, n: &Node, depth: usize, points: bool) {
                 }
             }
             ItemValue::Glyph(g) => println!("{pad}  glyph {} {:?}", it.id, g.text),
+            ItemValue::Image(i) => {
+                let file = sc.images.get(&i.image.value).map(|r| r.file.value.as_str());
+                println!(
+                    "{pad}  image {} {} file={file:?} id2={:?} id5={:?} triangles={:?}",
+                    it.id,
+                    hex(&i.image.value),
+                    i.id2,
+                    i.id5,
+                    i.indices
+                );
+                for v in &i.vertices {
+                    println!("{pad}    {} {} uv {} {}", v.x, v.y, v.u, v.v);
+                }
+            }
             ItemValue::Unknown(k, v) => println!("{pad}  unknown kind {k} ({} bytes)", v.len()),
         }
     }
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn main() {
@@ -92,6 +110,16 @@ fn main() {
         for (k, v) in &t.styles {
             println!("  style @{k}: {:?}", v.value);
         }
+    }
+    let mut images: Vec<_> = sc.images.iter().collect();
+    images.sort_by_key(|(k, _)| **k);
+    for (k, r) in images {
+        println!(
+            "image {} file={:?} flag={:?}",
+            hex(k),
+            r.file.value,
+            r.flag.as_ref().map(|f| f.value)
+        );
     }
     for w in &sc.warnings {
         println!("WARNING {w}");

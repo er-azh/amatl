@@ -1,7 +1,8 @@
 //! PDF output in the layout of xochitl's exporter (PDFium): a page stream that leaves a
 //! `72/227` y-down transform in place (where templates draw), then an annotation stream in
 //! points (y up), mapped back into that pixel space by its own `cm`. The annotation stream
-//! holds the pass-through strokes first, then each traced region as one even-odd filled path.
+//! holds the image items (as image objects) and pass-through strokes first, in z order, then
+//! each traced region as one even-odd filled path.
 //! Graphics state is written the way PDFium's content generator does: defaults once, then per
 //! object `q`, colors, non-default line parameters, and an ExtGState only when it changes.
 
@@ -71,6 +72,27 @@ pub(crate) struct Highlight {
     pub rects: Vec<(f32, f32, f32, f32)>,
 }
 
+/// Straight (not premultiplied) RGBA pixels, row by row.
+pub(crate) struct Bitmap {
+    pub w: u32,
+    pub h: u32,
+    pub px: Vec<[u8; 4]>,
+    /// Whether the alpha channel is written (as a soft mask): xochitl hands PDFium an
+    /// `RGB32` image as BGRx, anything else converted to `ARGB32` as BGRA.
+    pub alpha: bool,
+}
+
+/// An image item, drawn in the annotation stream as a PDFium image object.
+pub(crate) struct Picture {
+    pub bitmap: Arc<Bitmap>,
+    /// The item's transform and its group's offset, in device pixels: it maps the rect
+    /// (-0.5, -0.5, 1, 1) the image fills.
+    pub m: crate::render::Affine,
+    /// How many of the page's strokes come before it: PDFium gets image objects and the
+    /// pass-through strokes in z order.
+    pub before: usize,
+}
+
 /// One page's objects, until the shared ones (graphics states, fonts, images) are written.
 struct PageObjects {
     id: Ref,
@@ -83,6 +105,8 @@ struct PageObjects {
     states: Vec<String>,
     fonts: Vec<usize>,
     images: Vec<usize>,
+    /// Image items' bitmaps, as `/FXXn` in order.
+    pictures: Vec<Ref>,
 }
 
 /// One PDF page as [`write()`] draws it; built by [`crate::export::page`].
@@ -100,6 +124,8 @@ pub struct Page {
     /// Text highlights on a PDF page.
     pub(crate) highlights: Vec<Highlight>,
     pub(crate) strokes: Vec<Stroke>,
+    /// Image items.
+    pub(crate) pictures: Vec<Picture>,
     /// Traced regions, coordinates in 1/8 device pixels.
     pub(crate) groups: Vec<Group>,
 }
@@ -132,6 +158,12 @@ pub fn write(pages: &[Page]) -> Vec<u8> {
         pdf.stream(base, c.as_bytes());
         let (out, used) = annots::stream(page, hpt, &mut states);
         pdf.stream(annot_stream, out.as_bytes());
+        // PDFium writes each image object's bitmap as its own XObject.
+        let pictures = page
+            .pictures
+            .iter()
+            .map(|p| image::write_bitmap(&mut pdf, &mut alloc, &p.bitmap))
+            .collect();
         page_states.push(PageObjects {
             id,
             base,
@@ -141,6 +173,7 @@ pub fn write(pages: &[Page]) -> Vec<u8> {
             states: used,
             fonts: page_fonts,
             images: page_images,
+            pictures,
         });
     }
 
@@ -198,10 +231,13 @@ pub fn write(pages: &[Page]) -> Vec<u8> {
                 f.pair(Name(format!("F{i}").as_bytes()), font_ids[i]);
             }
         }
-        if !po.images.is_empty() {
+        if !po.images.is_empty() || !po.pictures.is_empty() {
             let mut x = res.x_objects();
             for i in po.images {
                 x.pair(Name(format!("Im{i}").as_bytes()), image_ids[i]);
+            }
+            for (i, &r) in po.pictures.iter().enumerate() {
+                x.pair(Name(format!("FXX{}", i + 1).as_bytes()), r);
             }
         }
         res.finish();

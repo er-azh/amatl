@@ -9,8 +9,8 @@ use std::fmt::Write as _;
 use crate::Error;
 use crate::format::crdt::{CrdtId, Item, Lww, toposort};
 use crate::format::scene::{
-    GlyphRange, ItemValue, Line, Node, ParagraphStyle, PenColor, Point, Rect, RootText, Scene,
-    SceneInfo, TextValue, Tool,
+    GlyphRange, ImageItem, ImageKey, ImageRef, ItemValue, Line, Node, ParagraphStyle, PenColor,
+    Point, Rect, RootText, Scene, SceneInfo, TextValue, Tool, Vertex,
 };
 use crate::format::tagged::{BlockInfo, Reader, TagType, blocks};
 
@@ -28,6 +28,8 @@ mod block {
     pub const AUTHOR_IDS: u8 = 0x09;
     pub const PAGE_INFO: u8 = 0x0a;
     pub const SCENE_INFO: u8 = 0x0d;
+    pub const IMAGES_TABLE: u8 = 0x0e;
+    pub const IMAGE_ITEM: u8 = 0x0f;
 }
 
 /// Item value kinds, the first byte of an item block's value.
@@ -35,6 +37,7 @@ mod kind {
     pub const GLYPH: u8 = 1;
     pub const GROUP: u8 = 2;
     pub const LINE: u8 = 3;
+    pub const IMAGE: u8 = 7;
 }
 
 fn lww<'a, T>(
@@ -114,6 +117,7 @@ fn item_value(r: &mut Reader, block_type: u8) -> Result<ItemValue, Error> {
         (block::GROUP_ITEM, kind::GROUP) => ItemValue::Group(r.tag_id(2)?),
         (block::LINE_ITEM, kind::LINE) => ItemValue::Line(line(r)?),
         (block::GLYPH_ITEM, kind::GLYPH) => ItemValue::Glyph(glyph(r)?),
+        (block::IMAGE_ITEM, kind::IMAGE) => ItemValue::Image(image_item(r)?),
         _ => ItemValue::Unknown(kind, r.rest().to_vec()),
     })
 }
@@ -187,6 +191,87 @@ fn glyph(r: &mut Reader) -> Result<GlyphRange, Error> {
         argb,
         extra,
     })
+}
+
+fn image_key(r: &mut Reader, i: u64) -> Result<ImageKey, Error> {
+    let mut s = r.tag_sub(i)?;
+    let at = s.pos();
+    let key = s
+        .bytes(s.remaining())?
+        .try_into()
+        .map_err(|_| Error::Format {
+            offset: at,
+            msg: "image key is not 16 bytes".into(),
+        })?;
+    Ok(key)
+}
+
+fn image_item(r: &mut Reader) -> Result<ImageItem, Error> {
+    let image = lww(r, 1, |s| image_key(s, 2))?;
+    let id2 = r.opt(2, TagType::Id, Reader::tag_id)?;
+    let mut s = r.tag_sub(3)?;
+    let n = s.varuint()?;
+    if n % 4 != 0 {
+        return Err(Error::Format {
+            offset: s.pos(),
+            msg: format!("{n} vertex floats"),
+        });
+    }
+    let mut vertices = Vec::with_capacity(n as usize / 4);
+    for _ in 0..n / 4 {
+        vertices.push(Vertex {
+            x: s.f32()?,
+            y: s.f32()?,
+            u: s.f32()?,
+            v: s.f32()?,
+        });
+    }
+    finish_sub(&s)?;
+    let mut s = r.tag_sub(4)?;
+    let n = s.varuint()?;
+    let mut indices = Vec::with_capacity(n as usize);
+    for _ in 0..n {
+        indices.push(s.u32()?);
+    }
+    finish_sub(&s)?;
+    let id5 = r.opt(5, TagType::Id, Reader::tag_id)?;
+    let extra = r.rest().to_vec();
+    Ok(ImageItem {
+        image,
+        id2,
+        vertices,
+        indices,
+        id5,
+        extra,
+    })
+}
+
+/// The image table: a map from 16-byte keys to the PNG's file name and a flag.
+fn images_table(r: &mut Reader) -> Result<Vec<(ImageKey, ImageRef)>, Error> {
+    let mut s = r.tag_sub(1)?;
+    let n = s.varuint()?;
+    let mut out = Vec::new();
+    for _ in 0..n {
+        let mut e = s.tag_sub(0)?;
+        let at = e.pos();
+        let key: ImageKey = e.bytes(16)?.try_into().map_err(|_| Error::Format {
+            offset: at,
+            msg: "image key".into(),
+        })?;
+        let file = lww(&mut e, 1, |s| tag_string(s, 2))?;
+        let flag = e.opt(2, TagType::Length4, |r, i| {
+            lww(r, i, |s| {
+                let mut v = s.tag_sub(2)?;
+                let b = v.tag_u8(1)?;
+                finish_sub(&v)?;
+                Ok(b)
+            })
+        })?;
+        finish_sub(&e)?;
+        out.push((key, ImageRef { file, flag }));
+    }
+    finish_sub(&s)?;
+    Ok(out)
 }
 
 fn root_text(r: &mut Reader) -> Result<RootText, Error> {
@@ -379,7 +464,7 @@ impl Scene {
                 warn_extra(&mut self.warnings, "tree node", &n.extra);
                 self.nodes.insert(n.id, n);
             }
-            block::GLYPH_ITEM..=block::LINE_ITEM => {
+            block::GLYPH_ITEM..=block::LINE_ITEM | block::IMAGE_ITEM => {
                 let t = info.block_type;
                 let (parent, item) = read_item(r, |s| item_value(s, t))?;
                 match &item.value {
@@ -387,6 +472,7 @@ impl Scene {
                     Some(ItemValue::Glyph(g)) => {
                         warn_extra(&mut self.warnings, "glyph range", &g.extra)
                     }
+                    Some(ItemValue::Image(i)) => warn_extra(&mut self.warnings, "image", &i.extra),
                     Some(ItemValue::Unknown(k, _)) => self.warnings.push(format!(
                         "item kind {k} in block {t:#x} at {:#x}",
                         info.offset
@@ -409,6 +495,7 @@ impl Scene {
                 });
             }
             block::AUTHOR_IDS => self.author_ids = author_ids(r)?,
+            block::IMAGES_TABLE => self.images.extend(images_table(r)?),
             block::PAGE_INFO => {
                 let mut v = Vec::new();
                 let mut i = 1;
