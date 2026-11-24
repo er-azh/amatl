@@ -2,7 +2,8 @@
 //! `72/227` y-down transform in place (where templates draw), then an annotation stream in
 //! points (y up), mapped back into that pixel space by its own `cm`. The annotation stream
 //! holds the image items (as image objects) and pass-through strokes first, in z order, then
-//! each traced region as one even-odd filled path.
+//! each traced region as one even-odd filled path. A page with nothing for that stream gets
+//! none: PDFium leaves pages it adds no objects to as Qt wrote them.
 //! Graphics state is written the way PDFium's content generator does: defaults once, then per
 //! object `q`, colors, non-default line parameters, and an ExtGState only when it changes.
 
@@ -97,7 +98,8 @@ pub(crate) struct Picture {
 struct PageObjects {
     id: Ref,
     base: Ref,
-    annots: Ref,
+    /// None for a page with nothing in the annotation layer.
+    annots: Option<Ref>,
     /// Media box size in points.
     w: f32,
     h: f32,
@@ -131,6 +133,10 @@ pub struct Page {
 }
 
 pub fn write(pages: &[Page]) -> Vec<u8> {
+    write_pages(pages, false)
+}
+
+pub(crate) fn write_pages(pages: &[Page], annots: bool) -> Vec<u8> {
     let mut pdf = Pdf::new();
     let mut next = Ref::new(1);
     let mut alloc = || next.bump();
@@ -152,12 +158,22 @@ pub fn write(pages: &[Page]) -> Vec<u8> {
             (page.w as f32 * PT_PER_PX).round(),
             (page.h as f32 * PT_PER_PX).round(),
         );
-        let (base, annot_stream) = (alloc(), alloc());
-
+        let base = alloc();
         let (c, page_fonts, page_images) = page::stream(page, hpt, &mut fonts, &mut images);
         pdf.stream(base, c.as_bytes());
-        let (out, used) = annots::stream(page, hpt, &mut states);
-        pdf.stream(annot_stream, out.as_bytes());
+        let empty = !annots
+            && page.highlights.is_empty()
+            && page.strokes.is_empty()
+            && page.pictures.is_empty()
+            && page.groups.is_empty();
+        let (annot_stream, used) = if empty {
+            (None, vec![])
+        } else {
+            let (out, used) = annots::stream(page, hpt, &mut states);
+            let r = alloc();
+            pdf.stream(r, out.as_bytes());
+            (Some(r), used)
+        };
         // PDFium writes each image object's bitmap as its own XObject.
         let pictures = page
             .pictures
@@ -211,9 +227,11 @@ pub fn write(pages: &[Page]) -> Vec<u8> {
         .collect();
     for po in page_states {
         let mut p = pdf.page(po.id);
-        p.parent(tree)
-            .media_box(Rect::new(0.0, 0.0, po.w, po.h))
-            .contents_array([po.base, po.annots]);
+        p.parent(tree).media_box(Rect::new(0.0, 0.0, po.w, po.h));
+        match po.annots {
+            Some(a) => p.contents_array([po.base, a]),
+            None => p.contents(po.base),
+        };
         let mut res = p.resources();
         res.insert(Name(b"ColorSpace"))
             .dict()

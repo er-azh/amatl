@@ -180,8 +180,8 @@ impl Source {
                 }
             }
         }
-        let mut ours =
-            Document::load_mem(&crate::pdf::write(&drawn)).map_err(Error::Annotations)?;
+        let mut ours = Document::load_mem(&crate::pdf::write_pages(&drawn, true))
+            .map_err(Error::Annotations)?;
         // Page geometry and attributes are read before the page tree is changed.
         let geos: Vec<Option<Geo>> = kinds
             .iter()
