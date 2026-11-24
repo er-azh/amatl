@@ -1,23 +1,27 @@
 use crate::format::PenColor;
 
 impl PenColor {
+    /// xochitl 3.29's palette (the `QColor` table indexed by color id).
     pub fn to_argb(self, custom: Option<u32>) -> u32 {
         use PenColor::*;
         match self {
             Black => 0xff000000,
             Gray => 0xff909090,
             White => 0xffffffff,
-            HighlighterYellow => 0xfffefd60,
-            HighlighterGreen => 0xffa9fa5c,
-            HighlighterPink => 0xffff55cf,
+            HighlighterYellow => 0xffffed75,
+            HighlighterGreen => 0xffacff85,
+            HighlighterPink => 0xfff29eff,
             Blue => 0xff304ae0,
             Red => 0xffc23132,
-            HighlighterGray => 0x40000000,
+            HighlighterStackedGray => 0x40000000,
             ArgbCode => custom.unwrap_or(0xff000000),
             Green => 0xff91da71,
             Cyan => 0xff74d2e8,
             Magenta => 0xffc07fd2,
             Yellow => 0xfffae719,
+            HighlighterBlue => 0xffbeeafe,
+            HighlighterOrange => 0xffffc38c,
+            HighlighterGray => 0xffc7c7c6,
             Other(_) => 0xff000000,
         }
     }

@@ -132,13 +132,18 @@ pub enum PenColor {
     HighlighterPink,
     Blue,
     Red,
-    HighlighterGray,
+    /// Translucent gray (`HighlighterGray` before 3.29).
+    HighlighterStackedGray,
     /// The color is the explicit ARGB value stored with the item.
     ArgbCode,
     Green,
     Cyan,
     Magenta,
     Yellow,
+    HighlighterBlue,
+    HighlighterOrange,
+    /// Opaque gray, new in 3.29.
+    HighlighterGray,
     Other(u32),
 }
 
@@ -153,12 +158,15 @@ impl PenColor {
             5 => PenColor::HighlighterPink,
             6 => PenColor::Blue,
             7 => PenColor::Red,
-            8 => PenColor::HighlighterGray,
+            8 => PenColor::HighlighterStackedGray,
             9 => PenColor::ArgbCode,
             10 => PenColor::Green,
             11 => PenColor::Cyan,
             12 => PenColor::Magenta,
             13 => PenColor::Yellow,
+            14 => PenColor::HighlighterBlue,
+            15 => PenColor::HighlighterOrange,
+            16 => PenColor::HighlighterGray,
             id => PenColor::Other(id),
         }
     }
@@ -174,12 +182,15 @@ impl PenColor {
             PenColor::HighlighterPink => 5,
             PenColor::Blue => 6,
             PenColor::Red => 7,
-            PenColor::HighlighterGray => 8,
+            PenColor::HighlighterStackedGray => 8,
             PenColor::ArgbCode => 9,
             PenColor::Green => 10,
             PenColor::Cyan => 11,
             PenColor::Magenta => 12,
             PenColor::Yellow => 13,
+            PenColor::HighlighterBlue => 14,
+            PenColor::HighlighterOrange => 15,
+            PenColor::HighlighterGray => 16,
             PenColor::Other(id) => id,
         }
     }
